@@ -1,0 +1,7 @@
+@LABEL = The Portal
+@SHORT = Exit treewebber's realm
+@TARGET = portal.html
+This is a silly example to demonstrate how you can link to subparts of a
+website that are not meant to be processed by <b>treewebber</b>.
+The rationale for this is that the link target may be an independent web
+application.

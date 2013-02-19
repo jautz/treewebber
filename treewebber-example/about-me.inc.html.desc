@@ -1,0 +1,18 @@
+@LABEL=About Me
+@POSITION=1
+@SHORT = Some classified insider info ;)
+
+All you ever wanted to know about me -- i.e. nothing.
+
+
+Well, you know, this is only an example web and it's not that easy to find
+reasonable content for a website like this. Actually, I'm afraid that hardly
+anyone reads pages with a title like this.
+
+But the point is that this page shows you how to include an html page into the
+<b>treewebber</b>-generated website. Just put arbitrary content into a file
+with the filename extension <code>.inc.html</code> and create the corresponding
+description file (<code>.inc.html.desc</code>).
+Anything that is allowed to be placed inside the &lt;body&gt; element may be
+the file's content.
+

@@ -1,0 +1,6 @@
+
+Generic Installation Procedure for Unix Systems:
+
+./configure
+make
+make install

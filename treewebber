@@ -1,0 +1,1421 @@
+#!/usr/bin/perl -w
+#
+# $Id: treewebber,v 1.6 2007-04-22 10:52:08 odin Exp $
+# $Name:  $
+#
+###############################################################################
+#
+# Copyright (C) 2005   Joachim Jautz   http://www.jay-jay.net/contact.html
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+#
+###############################################################################
+#
+# 2005-04-15    0.01    - start of development
+# 2005-04-22    0.10    - first milestone
+# 2005-05-18    0.11    - using dirname as index title if @LABEL is not set
+# 2005-06-15    0.20    - added `last change' information behind file links and
+#                         in page header/footer of generated pages
+#                       - pages are only re-generated or overwritten if their
+#                         content has changed
+#                       - added --force and --version parameters
+#                       - expected css classes have changed
+# 2005-06-30    0.21    - added @VERSION keyword
+#
+# [ >0.21: put project under CVS control, further changes are documented there]
+#
+###############################################################################
+
+use File::Find;
+use Getopt::Long;
+use Pod::Usage;
+use strict;
+
+use Util::Logger;
+
+my $VERSION = get_version('$Name:  $') || 'unreleased; CVS $Id: treewebber,v 1.6 2007-04-22 10:52:08 odin Exp $';
+
+##### constants that can be customized #########################################
+
+# FILENAME EXTENSIONS
+#
+# Rules:
+# 1. In this script the dot (.) is part of the extension!
+# 2. Each of the following file extensions must be different from all others!
+#
+# filename extension for files describing other files with the same name, e.g.
+# "archive.tar.gz$DESC_EXT" describes the file archive.tar.gz
+my $DESC_EXT = '.desc';
+# extension for files to be included into this web's design
+my $HTML_INC_EXT = '.inc.html';
+# extension for generated pages based on included files
+my $HTML_GEN_EXT = '.html';
+# filenames that will be checked for existence if no --css option is given
+my @CSS_NAMES = qw(style.css stylesheet.css style-sheet.css);
+
+
+# TEXT STRINGS THAT APPEAR ON GENERATED WEB PAGES
+my $PLACEHOLDER_1 = '((__PLACEHOLDER_1__))';
+# LABELS
+my $LC_LBL_DETAILS      = 'Details';
+my $LC_LBL_MORE         = 'more...';
+# include $PLACEHOLDER_1 into the string value of $LC_LBL_LASTCHANGE; it will
+# be replaced by the appropriate timestamp
+my $LC_LBL_LASTCHANGE   = "[modified: $PLACEHOLDER_1]";
+my $LC_LBL_OVERVIEW     = 'Overview';
+my $LC_LBL_PLAINTEXT    = '[plain text]';
+my $LC_LBL_SITEMAP_HEAD = 'Sitemap';
+my $LC_LBL_SITEMAP_LINK = '[sitemap]';
+# fallback label for starting directory if no label is set in description file
+my $LC_LBL_ROOT         = 'ROOT';
+my $LC_LBL_SUBDIR       = '[directory]';
+# MESSAGES
+my $LC_MSG_DEPRECATED = 'This entry is obsolete. '
+      .'It still exists for backwards compatibility, but will be removed soon.';
+
+# string to seperate links of the navigation hierarchy
+my $NAV_SEPERATOR = ' &gt;&gt; ';
+
+##### constants for INTERNAL USE -- do not change ##############################
+
+# KEYWORDS that can be defined in description files
+my $SET_DEPRECATED = 'DEPRECATED';
+my $SET_LABEL      = 'LABEL';
+my $SET_NAVLABEL   = 'NAVLABEL';
+my $SET_OVERVIEW   = 'OVERVIEW';
+my $SET_POSITION   = 'POSITION';
+my $SET_SHORT      = 'SHORT';
+my $SET_TARGET     = 'TARGET';
+my $SET_TEXT2HTML  = 'TEXT2HTML';
+my $SET_VERSION    = 'VERSION';
+
+# KEYWORDS that are not documented because they are used internally only
+# contains the non-keyword lines of description files
+my $SET_BODY       = 'BODY';
+# filename that may change during text2html/include_html
+my $SET_FILE       = 'FILE';
+# saves original filename (compare to $SET_FILE)
+my $SET_ORIGFILE   = 'ORIGFILE';
+# indicates that the described file was generated during text2html/include_html
+my $SET_GENERATED  = 'GENERATED_BY_TREEWEBBER__DO_NOT_CHANGE';
+
+# this hash allows checking of keyword validity: true value => valid keyword
+my %SETTINGS = (
+  $SET_DEPRECATED => 1,
+  $SET_LABEL      => 1,
+  $SET_NAVLABEL   => 1,
+  $SET_OVERVIEW   => 1,
+  $SET_POSITION   => 1,
+  $SET_SHORT      => 1,
+  $SET_TARGET     => 1,
+  $SET_TEXT2HTML  => 1,
+  $SET_VERSION    => 1,
+  $SET_GENERATED  => 1
+);
+
+my $TYPE_DIR = 'D';
+my $TYPE_FILE = 'F';
+
+# when comparing generated page content with existing one ignore chars inside
+my $IGNORE_ON = '<!-- treewebber_ignore_start -->';
+my $IGNORE_OFF = '<!-- treewebber_ignore_end -->';
+
+##### process command line options #############################################
+
+my $options = { # set defaults
+  all => 0,
+  css => undef,
+  help => 0,
+  force => 0,
+  man => 0,
+  indexname => 'index.html',
+  sitemap => 'sitemap.html',
+  verbose => 'INFO',
+  version => ''
+};
+
+unless (parseCommandLineOptions($options)) {
+  usage_err("could not parse command line arguments");
+}
+
+##### instantiate used classes #################################################
+
+my $log = Util::Logger->new({ loglevel => $options->{verbose} });
+
+##### special command line options #############################################
+
+if ($options->{help} == 1) {
+  pod2usage(-exitval => 0, -verbose => 0);
+} elsif ($options->{help} > 1) {
+  pod2usage(-exitval => 0, -verbose => 1);
+} elsif ($options->{man}) {
+  pod2usage(-exitval => 0, -verbose => 2);
+} elsif ($options->{version}) {
+  print "$VERSION\n";
+  exit(0);
+} elsif (@ARGV ne 1) {
+  usage_err("exactly one non-option argument expected");
+} elsif (! -d $ARGV[0]) {
+  usage_err("non-option argument $ARGV[0] is not a directory");
+}
+
+##### core functionality #######################################################
+
+my $tree;
+my $node_mapping = {};
+
+if (chdir $ARGV[0]) {
+  search_css_file();
+
+  # traverse directory tree, generate pages and build $tree in memory
+  find({ preprocess => \&preprocess, wanted => \&process }, '.');
+
+  create_sitemap({ tree => $tree, file => $options->{sitemap} });
+
+} else {
+  $log->print('FATAL', 'cannot change to directory '.$ARGV[0]);
+  exit 1;
+}
+
+$log->print('INFO', 'Done.');
+exit 0;
+
+################################################################################
+##### SUBROUTINES ##############################################################
+################################################################################
+
+sub search_css_file {
+  if (defined $options->{css}) {
+    if (! -e $options->{css}) {
+      $log->print('WARN', 'style sheet file cannot be found in web root; thus, '
+                        .'generated pages will point to non-existent css file');
+    }
+  } else {
+    # looking for default style sheet
+    foreach my $css (@CSS_NAMES) {
+      if (-e $css) {
+        $log->print('INFO', "using default style sheet '$css'");
+        $options->{css} = $css;
+        last;
+      }
+    }
+  }
+}
+
+################################################################################
+
+sub add_node {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless ($args->{dir});
+  die unless (ref($args->{settings}) eq 'HASH');
+  die unless (ref($args->{parent}) eq 'HASH');
+
+  $args->{parent}->{children} = [] unless (exists $args->{parent}->{children});
+
+  # add node's name (= directory name) to build the new node's full path
+  my $path = File::Spec->catdir(File::Spec->splitdir($args->{dir}),
+                                $args->{settings}->{$SET_FILE});
+
+  my $node = { settings => $args->{settings},
+               parent   => $args->{parent},
+               path     => $path
+             };
+  # add node to parent's children
+  push @{$args->{parent}->{children}}, $node;
+
+  # create entry in $node_mapping for access via pathname
+  my $mapping = { path => $path, node => $node };
+  if (exists $node_mapping->{length($path)}) {
+    push @{$node_mapping->{length($path)}}, $mapping;
+  } else {
+    $node_mapping->{length($path)} = [ $mapping ];
+  }
+
+  # return reference to the newly created node
+  return $node;
+}
+
+################################################################################
+
+sub get_node {
+  my $path = shift or die;
+  $path = File::Spec->catdir(File::Spec->splitdir($path));
+
+  my $slice = $node_mapping->{length($path)} or return undef;
+
+  foreach my $mapping (@{$slice}) {
+    return $mapping->{node} if ($mapping->{path} eq $path);
+  }
+
+  return undef;
+}
+
+################################################################################
+
+sub create_sitemap {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{tree}) eq 'HASH');
+  die unless ($args->{file});
+
+  my $tmp_file = $args->{file}.".tmp$$";
+  return undef unless (open(FILE_SITEMAP, '>'.$tmp_file));
+
+  # traverse the directory tree recursively and create sitemap entries
+  my $output = [ "<h1>$LC_LBL_SITEMAP_HEAD</h1>" ];
+  traverse_branch({ node => $tree, lines => $output });
+  foreach my $line (@{$output}) {
+    print FILE_SITEMAP "$line\n";
+  }
+
+  close FILE_SITEMAP;
+
+  unless (include_html({ in_file => $tmp_file,
+                         out_file => $args->{file},
+                         node => $tree }))
+  {
+    $log->print('ERROR', "could not create sitemap page '$args->{file}'");
+  }
+
+  unlink $tmp_file;
+  return 1;
+}
+
+################################################################################
+
+sub traverse_branch {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{lines}) eq 'ARRAY');
+
+  return undef unless (ref($args->{node}) eq 'HASH');
+
+  # use recursion depth to determine the amount of indentation for this node
+  my $depth = $args->{depth} || 0;
+  my $indent = '';
+  for (my $i = 0; $i < $depth; ++$i) {
+    $indent = $indent.'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;';
+  }
+
+  # if all label keywords are set, use NAVLABEL as link title and put LABEL
+  # behind it, smaller and parenthesized
+  my $link_title = ($args->{node}->{settings}->{$SET_NAVLABEL} or
+                    $args->{node}->{settings}->{$SET_LABEL} or
+                    $args->{node}->{settings}->{$SET_FILE});
+  my $link_descr = ($args->{node}->{settings}->{$SET_LABEL} or
+                    $args->{node}->{settings}->{$SET_FILE});
+  $link_descr = undef if ($link_title eq $link_descr);
+
+  # create a sitemap entry
+  push @{$args->{lines}},
+       $indent.
+       '<a href="'.
+       File::Spec->catfile($args->{node}->{path},
+                           $args->{node}->{settings}->{$SET_TARGET} ||
+                                                         $options->{indexname}).
+       '">'.$link_title.'</a>'.
+       ($link_descr ? " <small>($link_descr)</small>" : '').
+       '<br />';
+
+  # recursive processing of tree structure
+  foreach my $node (@{$args->{node}->{children}}) {
+    traverse_branch({ node => $node,
+                      lines => $args->{lines},
+                      depth => $depth + 1 });
+  }
+}
+
+################################################################################
+
+sub preprocess {
+  $log->print('INFO', 'processing directory '.$File::Find::dir);
+
+  # find $node in $tree that represents currently processed directory
+  my $node;
+  if (defined $tree) {
+    $node = get_node($File::Find::dir);
+  } else {
+    # create tree when processing the starting directory
+    my $root_desc_file = File::Spec->catfile($File::Find::dir, $DESC_EXT);
+    my $root_settings = -e $root_desc_file
+                        ? get_settings($root_desc_file)
+                        : {};
+    $root_settings->{$SET_FILE} = $LC_LBL_ROOT;
+    $tree = { settings => $root_settings,
+              parent => undef,
+              path => $File::Find::dir };
+    $node = $tree;
+  }
+
+  # filtered directory entries, will contain only subdirs to recurse
+  my @result = ();
+  # list of files and dirs to be indexed, ordered by their $SET_POSITION
+  my $contents = [];
+  # only used temporarily, is finally appended to $contents
+  my $unordered_entries = { $TYPE_DIR => [], $TYPE_FILE => [] };
+
+  # iterate lexically sorted directory content
+  foreach my $file (sort @_) {
+    # skip index files that were generated (or at least will be overwritten)
+    next if ($file eq $options->{indexname});
+    # skip directories . and .. as well as files with extension $DESC_EXT
+    next if ($file =~ m/^\.{1,2}$|\Q$DESC_EXT\E$/);
+    # skip files and directories that start with a dot?
+    next if ($file =~ m/^\./  &&  !$options->{all});
+
+    # search for a corresponding desc file for $file
+    my $desc_file = $file.$DESC_EXT;
+    unless (-e $desc_file) {
+      $log->print('MORE', "no $DESC_EXT file found for '$file' => skipping");
+      next;
+    }
+    # read settings from desc file
+    my $settings = get_settings($desc_file);
+    next unless (defined $settings);            # skip on error
+    next if ($settings->{$SET_GENERATED});      # skip generated files
+    $settings->{$SET_FILE} = $file;             # add filename
+    $settings->{$SET_ORIGFILE} = $file;         # remember original filename
+
+    # create $contents entry (= to be indexed), ordered by position and type
+    my $type = -d $file ? $TYPE_DIR : $TYPE_FILE;
+    my $position = $settings->{$SET_POSITION};
+    if (defined $position && $position =~ m/^\d+$/) {
+      unless (defined $contents->[$position]->{$type}) {
+        $contents->[$position]->{$type} = [];
+      }
+      push @{$contents->[$position]->{$type}}, $settings;
+    } else {
+      push @{$unordered_entries->{$type}}, $settings;
+    }
+
+    # fork here: directory- / file-specific processing
+    if ($type eq $TYPE_DIR) {
+      # remember directory for recursion if $SET_TARGET is not set
+      push @result, $file if (! $settings->{$SET_TARGET});
+      # create a node in logical $tree for the currently processed directory
+      add_node({ parent => $node,
+                 settings => $settings,
+                 dir => $File::Find::dir });
+
+    } elsif ($type eq $TYPE_FILE) {
+      # generate an html include file from a plain text file?
+      if ($settings->{$SET_TEXT2HTML}) {
+        my $out_file = $file.$HTML_INC_EXT;
+        my $result = text2html({ in_file => $file, out_file => $out_file });
+        if (defined $result) {
+          if ($result == 0) {
+            $log->print('DEBUG', "skipping text->html for file '$file' because "
+                                ."'$out_file' exists and is newer");
+          } else {
+            $log->print('MORE', "text2html conversion: '$file' -> '$out_file'");
+          }
+          # overwrite name of plain-text file with generated one
+          $file = $out_file;
+        } else {
+          $log->print('ERROR', "could not convert text->html for file '$file'");
+        }
+      }
+
+      # generate page from an include file?
+      if ($file =~ m/\Q$HTML_INC_EXT\E$/) {
+        my $out_file = $file;
+        $out_file =~ s/\Q$HTML_INC_EXT\E$/$HTML_GEN_EXT/;
+        my $result = include_html({ in_file => $file,
+                                    out_file => $out_file,
+                                    ts_file => $settings->{$SET_ORIGFILE},
+                                    node => $node });
+        if (defined $result) {
+          if ($result == 0) {
+            $log->print('DEBUG', "skipping html inclusion from file '$file' ".
+                                 "because '$out_file' exists and is newer");
+          } else {
+            $log->print('MORE',
+                        "generating html page from '$file' into '$out_file'");
+          }
+          # overwrite inc file name with generated one
+          $file = $out_file;
+        } else {
+          $log->print('ERROR', "could not include html from file '$file'");
+        }
+      }
+
+      # filename to be referenced may have changed during text2html/include_html
+      $settings->{$SET_FILE} = $file;
+    } # END: file-specific processing
+  } # END: iterate directory entries
+
+  # append unordered entries to the list of contents
+  push @{$contents}, $unordered_entries;
+
+  # generate index file
+  make_index({ contents => $contents, node => $node }) ||
+    $log->print('ERROR', "cant read/write index file '$options->{indexname}'");
+
+  # return list of directories to be recursed into
+  return @result;
+}
+
+################################################################################
+
+sub process {
+}
+
+################################################################################
+
+sub make_index {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{contents}) eq 'ARRAY');
+  die unless (ref($args->{node}) eq 'HASH');
+
+  # generate index page content as an array of lines
+  my @gen_page = ();
+  # save generated navigation because we need it twice (top & bottom of page)
+  my $navi = generate_navigation({ node => $args->{node},
+                                   lastchange => timestamp2string(time) });
+
+  # html header
+  push @gen_page,
+       generate_header({ node => $args->{node},
+                         title => $args->{node}->{settings}->{$SET_LABEL} });
+  # navigation bar (top)
+  push @gen_page, $navi, "<hr />\n";
+  # main page content
+  push @gen_page, generate_index_content({ node => $args->{node},
+                                           contents => $args->{contents} });
+  # navigation bar (bottom)
+  push @gen_page, "<hr />\n", $navi;
+  # html footer
+  push @gen_page, generate_footer();
+
+  # write @gen_page to index file if one of these is true:
+  # - force is applied
+  # - it does not exist yet
+  # - its contents have changed
+  if ($options->{force}  ||
+      ! -e $options->{indexname}  ||
+      has_changed({ file => $options->{indexname}, lines => \@gen_page }))
+  {
+    $log->print('DEBUG', 'generating index file '.$options->{indexname});
+    return undef unless (open(FILE_INDEX, '>'.$options->{indexname}));
+    foreach my $gen_part (@gen_page) {
+      print FILE_INDEX $gen_part;
+    }
+    close FILE_INDEX;
+  }
+
+  return 1;
+}
+
+################################################################################
+# text2html(hashref args)
+#
+# Valid hash entries for args: in_file => string, out_file => string
+#
+# Converts a plain text file into a simple but correct html markup.
+# NOTE: it does not create a complete html page but rather a well-formed snippet
+#       to be included into the body element of an html page.
+#
+# Returns
+#       1 on success
+#       0 if nothing was done (out_file exists and is newer than in_file)
+#       undef if a file could not be opened
+sub text2html {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (defined $args->{in_file});
+  die unless (defined $args->{out_file}  &&
+              $args->{in_file} ne $args->{out_file});
+
+  if (! $options->{force}) {
+    # skip this block when force is used
+    if (-e $args->{out_file}) {
+      # no update needed if out_file exists and its last modification is same
+      # or newer than that of in_file
+      return 0 if (get_mtime($args->{in_file}) <= get_mtime($args->{out_file}));
+    }
+  }
+
+  return undef unless (open(FILE_TEXT2HTML_IN, $args->{in_file}));
+  return undef unless (open(FILE_TEXT2HTML_OUT, '>'.$args->{out_file}));
+  return undef unless (open(FILE_TEXT2HTML_OUT_DESC,
+                            '>'.$args->{out_file}.$DESC_EXT));
+
+  # insert text verbatim, replace reserved html characters
+  print FILE_TEXT2HTML_OUT '<pre>';
+  while (<FILE_TEXT2HTML_IN>) {
+    if (m/[<>&"]/) {
+      s/&/&amp;/g;  # must be the first regexp, otherwise will escape entities
+      s/</&lt;/g;
+      s/>/&gt;/g;
+      s/"/&quot;/g;
+    }
+    print FILE_TEXT2HTML_OUT $_;
+  }
+  print FILE_TEXT2HTML_OUT '</pre>';
+
+  # mark out_file as generated
+  print FILE_TEXT2HTML_OUT_DESC '@'."$SET_GENERATED\n";
+
+  close FILE_TEXT2HTML_IN;
+  close FILE_TEXT2HTML_OUT;
+  close FILE_TEXT2HTML_OUT_DESC;
+  return 1;
+}
+
+################################################################################
+# include_html(hashref args)
+#
+# Valid hash entries for args: in_file => string, out_file => string,
+# node => hashref, [ ts_file => string ]
+#
+# Includes the input into a complete html page.
+# $args->{in_file} is expected to be a well-formed html snippet that is to be
+# included into the body element of the generated html page.
+# If $ts_file is specified then it is used to retrieve the modification
+# timestamp to be displayed -- instead of $in_file's modification timestamp.
+#
+# Returns
+#       1 on success
+#       0 if nothing was done (out_file exists and is newer than in_file)
+#       undef if a file could not be opened
+sub include_html {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (defined $args->{in_file});
+  die unless (defined $args->{out_file}  &&
+              $args->{in_file} ne $args->{out_file});
+
+  if (! $options->{force}) {
+    # skip this block when force is used
+    if (-e $args->{out_file}) {
+      # no update needed if out_file exists and its last modification is same
+      # or newer than that of in_file
+      return 0 if (get_mtime($args->{in_file}) <= get_mtime($args->{out_file}));
+    }
+  }
+
+  return undef unless (open(FILE_HTML_IN, $args->{in_file}));
+  return undef unless (open(FILE_HTML_OUT, '>'.$args->{out_file}));
+  return undef unless (open(FILE_HTML_OUT_DESC,
+                            '>'.$args->{out_file}.$DESC_EXT));
+
+  my $ts = timestamp2string(get_mtime($args->{ts_file} || $args->{in_file}));
+  my $navi = generate_navigation({ node => $args->{node},
+                                   lastchange => $ts,
+                                   append => [ $args->{out_file} ] });
+
+  print FILE_HTML_OUT generate_header({ node => $args->{node},
+                                        title => $args->{out_file} });
+  print FILE_HTML_OUT "$navi\n<hr />\n";
+  print FILE_HTML_OUT $_ while (<FILE_HTML_IN>);
+  print FILE_HTML_OUT "<hr />\n$navi\n";
+  print FILE_HTML_OUT generate_footer();
+
+  # mark out_file as generated
+  print FILE_HTML_OUT_DESC '@'."$SET_GENERATED\n";
+
+  close FILE_HTML_IN;
+  close FILE_HTML_OUT;
+  close FILE_HTML_OUT_DESC;
+  return 1;
+}
+
+################################################################################
+
+sub get_settings {
+  my $file = shift;
+  unless (-f $file && -r $file) {
+    $log->print('ERROR', "file '$file' is no file or not readable");
+    return undef;
+  }
+  my $settings = {};
+  my @body = ();
+
+  if (open(FILE_SETTINGS, $file)) {
+    while (<FILE_SETTINGS>) {
+      my ($key, $val);
+      chomp;
+      if (m/^\s*@(\w+)\s*=\s*(.+?)\s*$/) {
+        $key = $1;
+        $val = $2;
+
+      } elsif (m/^\s*@(\w+)\s*$/) {
+        $key = $1;
+        $val = 1;
+
+      } else {
+        push @body, $_;
+        next;
+      }
+
+      # add entry to result hash if valid key was found
+      if (exists $SETTINGS{$key}) {
+        $settings->{$key} = $val;
+      } else {
+        $log->print('WARN', "skipping invalid keyword '$key' in file '$file'");
+      }
+    }
+    close FILE_SETTINGS;
+    # concatenate all body lines as one string; empty lines create new paragraph
+    $settings->{$SET_BODY} = '<p>'.join("\n", @body).'</p>';
+    $settings->{$SET_BODY} =~ s/\n(\s*\n)+/<\/p>\n<p>/g;
+
+  } else {
+    $log->print('ERROR', "failure opening description file '$file'");
+    return undef;
+  }
+
+  return $settings;
+}
+
+################################################################################
+
+sub get_path_to_root {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{node}) eq 'HASH');
+
+  my $node = $args->{node}->{parent};
+  my @up_dirs = ();
+
+  while (defined $node) {
+    push @up_dirs, '..';
+    $node = $node->{parent};
+  }
+
+  return @up_dirs ? join '/', @up_dirs : '.';
+}
+
+################################################################################
+# node => hashref, [ title => string ]
+
+sub generate_header {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{node}) eq 'HASH');
+
+  my $title = $args->{title} ? '<title>'.$args->{title}.'</title>' : '';
+
+  my $css = '';
+  if ($options->{css}) {
+    # generate link to the stylesheet relative to the current working directory
+    $css = '<link rel="stylesheet" type="text/css" href="'
+          .get_path_to_root({ node => $args->{node} }).'/'.$options->{css}
+          .'" />';
+  }
+
+  return <<EOT;
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+     "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<!-- page generated by "treewebber" (available at http://www.jay-jay.net) -->
+<head>
+  $title
+  $css
+</head>
+<body>
+<div class="page">
+EOT
+}
+
+################################################################################
+
+sub generate_footer {
+  return <<EOT;
+</div>
+</body>
+</html>
+EOT
+}
+
+################################################################################
+
+sub generate_navigation_links {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{node}) eq 'HASH');
+
+  my $node = $args->{node};
+  my @node_stack = ();
+  my @result = ();
+
+  # @node_stack example: ( node-3-1-5, node-3-1, node-3, root )
+  while (defined $node) {
+    push @node_stack, $node;
+    $node = $node->{parent};
+  }
+
+  while (my $item = pop @node_stack) {
+    my @up_dirs = ();
+    for (my $i = 0; $i < @node_stack; ++$i) {
+      push @up_dirs, '..';
+    }
+    my $up_path = @up_dirs ? join '/', @up_dirs : '.';
+    push @result, '<a href="'.$up_path.'/'.$options->{indexname}.'">'.
+                  ($item->{settings}->{$SET_NAVLABEL} ||
+                   $item->{settings}->{$SET_LABEL} ||
+                   $item->{settings}->{$SET_FILE}).'</a>';
+  }
+  return \@result;
+}
+
+################################################################################
+# keys: node, lastchange, [append]
+
+sub generate_navigation {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{node}) eq 'HASH');
+  die unless (defined $args->{lastchange});
+  die if (defined $args->{append} && ! ref($args->{append}) eq 'ARRAY');
+
+  my $links = generate_navigation_links({ node => $args->{node} });
+  # append further items to the list of links
+  push @{$links}, @{$args->{append}} if (defined $args->{append});
+  # seperate the items with $NAV_SEPERATOR for presentation
+  my $navi = join($NAV_SEPERATOR, @{$links});
+
+  # generate sitemap link
+  my $sm_link = '<a href="'.get_path_to_root({ node => $args->{node} })
+               .'/'.$options->{sitemap}.'">'.$LC_LBL_SITEMAP_LINK.'</a>';
+
+  # put last change timestamp into an ignore area so that pages will not be
+  # overwritten if the timestamp is the only element that has changed
+  my $ts = $IGNORE_ON.$args->{lastchange}.$IGNORE_OFF;
+  my $lastchange = $LC_LBL_LASTCHANGE;
+  $lastchange =~ s/\Q$PLACEHOLDER_1/$ts/g;
+
+  return <<EOT;
+<table style="width:100%">
+  <tr>
+    <td class="navigation">$navi</td>
+    <td class="navigation" style="text-align:right">$sm_link $lastchange</td>
+  </tr>
+</table>
+EOT
+}
+
+################################################################################
+
+sub generate_index_content {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless (ref($args->{contents}) eq 'ARRAY');
+  die unless (ref($args->{node}) eq 'HASH');
+
+  # generate main content
+  my @main = ();
+  my @overview = ();    # lines for overview table
+  # iterate entries of array ($SET_POSITION order)
+  foreach my $pos (@{$args->{contents}}) {
+    # join entries with equal $SET_POSITION, dirs before files ...
+    my @items = ();
+    push @items, @{$pos->{$TYPE_DIR}} if (defined $pos->{$TYPE_DIR});
+    # ... and remember the index that seperates directories from files
+    my $first_file_index = @items;
+    push @items, @{$pos->{$TYPE_FILE}} if (defined $pos->{$TYPE_FILE});
+
+    # iterate the joined entries with equal $SET_POSITION
+    for (my $item_index = 0; $item_index < @items; ++$item_index) {
+      my $item = $items[$item_index];
+      my $short      = $item->{$SET_SHORT} || '';
+      my $label      = $item->{$SET_LABEL} || $item->{$SET_FILE};
+      my $version    = $item->{$SET_VERSION} || '';
+      my $body       = $item->{$SET_BODY} || '';
+      my $deprecated = $item->{$SET_DEPRECATED}
+                       ? "<p><i>$LC_MSG_DEPRECATED</i></p>" : '';
+      my $anchor = 'goto_'.$item->{$SET_FILE};
+      $anchor =~ s/\W/_/g;
+      my $target = $item->{$SET_FILE};
+      my $special = '';
+
+      if ($item_index < $first_file_index) {
+        # DIRECTORY SPECIFIC SETTINGS
+        $special .= "&nbsp; $LC_LBL_SUBDIR";
+        if (my $t_file = $item->{$SET_TARGET}) {
+          $target = File::Spec->catfile($target, $t_file);
+          $log->print('WARN', "Target '$target' not found") if (! -e $target);
+        } else {
+          $target = File::Spec->catfile($target, $options->{indexname});
+        }
+      } else {
+        # FILE SPECIFIC SETTINGS
+        if ($item->{$SET_TEXT2HTML}) {
+          # additional link to plain text file
+          $special .= '&nbsp; <a href="'.$item->{$SET_ORIGFILE}.'">'.
+                      $LC_LBL_PLAINTEXT.'</a>';
+        }
+        if (my $ts = timestamp2string(get_mtime($item->{$SET_ORIGFILE}))) {
+          # add last modification date if available
+          $special .= '&nbsp; '.$LC_LBL_LASTCHANGE;
+          $special =~ s/\Q$PLACEHOLDER_1/$ts/g;
+        }
+      }
+
+      push @overview, <<EOT;
+      <tr>
+        <td class="overview"><a href="$target">$label $version</a></td>
+        <td class="overview">$short</td>
+        <td class="overview"><a href="#$anchor">$LC_LBL_MORE</a></td>
+      </tr>
+EOT
+      push @main, <<EOT;
+      <p>
+        <b><a href="$target">$label</a> $version</b>
+        <span class="qualifiers">$special</span>
+        <a name="$anchor">&nbsp;</a>
+      </p>
+      $deprecated
+      $body
+      <p>&nbsp;</p>
+EOT
+    }
+  }
+
+  # PUT IT ALL TOGETHER
+  my @lines = ();
+
+  # headline and directory description
+  push @lines, '<h1>'.
+                ($args->{node}->{settings}->{$SET_LABEL} or
+                 $args->{node}->{settings}->{$SET_FILE}).
+                ' '.
+                ($args->{node}->{settings}->{$SET_VERSION} or ' ').
+               '</h1>';
+  if ($args->{node}->{settings}->{$SET_BODY}) {
+    push @lines, $args->{node}->{settings}->{$SET_BODY}, '<p>&nbsp;</p>';
+  }
+
+  # overview?
+  if ($args->{node}->{settings}->{$SET_OVERVIEW}) {
+    push @lines, "<h2>$LC_LBL_OVERVIEW</h2>";
+    push @lines, '<table class="overview">';
+    push @lines, @overview;
+    push @lines, '</table>';
+    push @lines, '<p>&nbsp;</p>';
+    push @lines, "<h2>$LC_LBL_DETAILS</h2>";
+  }
+
+  # details
+  push @lines, @main;
+
+  return join("\n", @lines)."\n";
+}
+
+################################################################################
+
+sub has_changed {
+  my $args = shift;
+  die unless (ref($args) eq 'HASH');
+  die unless ($args->{file});
+  die unless (ref($args->{lines}) eq 'ARRAY');
+
+  return undef unless (open(FILE_INDEX, $args->{file}));
+  # each element in $args->{lines} may consist of a block of lines (created by
+  # the `here documents' in this script); these blocks will be split into single
+  # lines so that they can be compared to the lines in FILE_INDEX
+  my $has_changed = 1;
+  my $lines_index = 0;
+  my @lines_buffer = ();
+  while (defined (my $file_line = <FILE_INDEX>)) {
+    # remove newline as well as leading or trailing whitespace
+    chomp $file_line;
+    $file_line =~ s/^\s+|\s+$//g;
+    next if ($file_line =~ m/^$/);    # skip empty lines
+
+    # (re)fill buffer of generated lines if empty
+    while (@lines_buffer == 0) {
+      last if ($lines_index >= @{$args->{lines}});
+      my @lines = split /[\n\r\012\015]+/, $args->{lines}->[$lines_index++];
+      foreach my $line (@lines) {
+        chomp $line;
+        $line =~ s/^\s+|\s+$//g;
+        next if ($line =~ m/^$/);     # skip empty lines
+        push @lines_buffer, $line;
+      }
+    }
+    my $arr_line = shift @lines_buffer;
+    # break here if end of generated content has been reached
+    last unless (defined $arr_line);
+
+    # remove ignorable areas (minimize greediness by '?') before comparing
+    $arr_line =~ s/\Q$IGNORE_ON\E.*?\Q$IGNORE_OFF//g;
+    $file_line =~ s/\Q$IGNORE_ON\E.*?\Q$IGNORE_OFF//g;
+
+    # break here if lines differ
+    if ($file_line ne $arr_line) {
+      $log->print('DEBUG', "index file differs from newly generated content: "
+                          ."($file_line) != ($arr_line)");
+      $has_changed = 1;
+      last;
+    } else {
+      $has_changed = 0;
+    }
+  }
+
+  # content HAS changed if FILE_INDEX or $args->{lines} have content left
+  if (! $has_changed) {
+    my @rest = ();
+    @rest = <FILE_INDEX> unless (eof FILE_INDEX);
+    push @rest, @lines_buffer;
+    # @rest consists of more than blanks and control chars => content changed
+    $has_changed = (join('', @rest) !~ m/^[\s\n\r\012\015]*$/);
+  }
+
+  close FILE_INDEX;
+  return $has_changed;
+}
+
+################################################################################
+# get_mtime(string $file)
+#
+# Reads the last modification's timestamp from $file.
+#
+# Returns a positive integer (number of seconds since 1970-01-01)
+# or -1 on error
+sub get_mtime {
+  my $file = shift;
+  my @stats = stat($file);
+  # mtime is at index 9 of the stat result
+  return (defined $stats[9] ? $stats[9] : -1);
+}
+
+################################################################################
+# timestamp2string(int $time)
+#
+# Creates a string representation of a time (in seconds since 1970-01-01)
+# that looks like this: `2004-03-12 16:07'.
+# The time is adapted to the local time zone by means of the Perl built-in
+# localtime command.
+# If the $time parameter is invalid a null string ('') will be returned.
+#
+# Returns a string.
+sub timestamp2string {
+  my $time = shift;
+  return '' unless (defined $time && $time =~ m/^\d+$/);
+
+  my @t = localtime($time);
+  return '' unless (@t);
+
+  return sprintf("%d-%02d-%02d %02d:%02d",
+                 (1900 + $t[5]), ++$t[4], $t[3], $t[2], $t[1]);
+}
+
+################################################################################
+
+sub parseCommandLineOptions {
+  my $opts = shift;
+  return undef unless (ref($opts) eq 'HASH');
+
+  my $optionParser = Getopt::Long::Parser->new(config => ["bundling"]);
+
+  return $optionParser->getoptions(
+    'all|a' => \$opts->{all},
+    'css=s' => \$opts->{css},
+    'force|f' => \$opts->{force},
+    'help|h|?+' => \$opts->{help},
+    'man' => \$opts->{man},
+    'index-name=s' => \$opts->{indexname},
+    'sitemap-name=s' => \$opts->{sitemap},
+    'verbose|v=s' => \$opts->{verbose},
+    'version|V' => \$opts->{version}
+  );
+}
+
+################################################################################
+# get_version('$Name:  $')
+#
+# Extracts the release version from the CVS Name Tag that was used to checkout
+# or export the file from the repository.
+# Returns undef if it is empty (e.g. after checkout/export without -r <CVSTAG>)
+# or if it does not match the pattern (expects something like rel_1_23).
+# Otherwise a string like 1.23 is returned.
+#
+sub get_version {
+  return undef unless (defined $_[0]);
+
+  return $_[0] =~ m/rel_(\d+)_(\d+)/ ? "$1.$2" : undef;
+}
+
+################################################################################
+# usage_err([<string> err])
+#
+# This exits the program with return code 1 after printing a hint how
+# to use it.
+# This hint is the SYNOPSIS section of the program's POD documentation.
+# The optional err argument can be given to print an error message first.
+#
+sub usage_err {
+  my $err = shift;
+
+  if (defined $err) {
+    pod2usage(-exitval => 1, -verbose => 0, -message => "\nERROR: $err\n");
+  } else {
+    pod2usage(-exitval => 1, -verbose => 0);
+  }
+}
+
+
+__END__
+
+
+
+=head1 NAME
+
+treewebber - generate WWW pages from filesystem tree
+
+
+
+=head1 SYNOPSIS
+
+How to get help:
+If one of the B<--help> options is specified once a short overview will
+be printed;
+if specified twice you will get detailed information about command line options.
+B<--man> gives you the whole manual.
+
+B<treewebber>
+[B<-a>, B<--all>]
+[B<--css> F<FILE>]
+[B<-f>, B<--force>]
+[B<--index-name> I<STRING>]
+[B<--sitemap-name> I<STRING>]
+[B<-v>, B<--verbose> I<STRING>]
+F<DIRECTORY>
+
+B<treewebber> B<-?>, B<-h>, B<--help> | B<--man>
+
+B<treewebber> B<-V>, B<--version>
+
+
+=head1 DESCRIPTION
+
+The idea behind B<treewebber> is to generate web pages automatically by
+traversing a directory tree and looking for so-called I<description files>
+(see below).
+These files contain meta data and provide the information necessary to
+generate index pages and navigation between them.
+
+The program starts its directory tree traversal in the given F<DIRECTORY>
+and therein creates the web pages.
+Thus, if you are new to this program, make a backup of that directory first
+in order not to clobber any files by mistake.
+
+
+=head2 THE DESCRIPTION FILES
+
+For each file that you want to appear on the generated pages there must be
+a description file.
+The same holds true for directories. In this case the absence of a
+description file also prevents recursion into this directory so that
+nothing inside this directory is indexed.
+
+Description files must have the same name as the file or directory they
+describe with an appended `.desc'.
+For example, the description file for `download.tar.gz' would be
+`download.tar.gz.desc'. And to include the directory `articles' there must be
+a file named `articles.desc' besides the directory itself.
+There is also one special case: following these rules it would be necessary to
+create a file one level above the given F<DIRECTORY> if you wanted to add a
+description file for the root directory in which the program starts (i.e.
+../F<DIRECTORY>.desc). Do not do that.
+Instead, create a file simply named F<.desc> within F<DIRECTORY>.
+
+The existence of such a description file suffices if you want a link to be
+generated, but in most cases you will at least add some lines of text that
+describe the file or directory.
+If the describing text is quite long you may structure it into paragraphs by using
+blank lines; this will enclose text blocks in html <p> elements.
+For further formatting, e.g. bold face or italics, you may also use HTML markup.
+
+In the description files, all lines are regarded to be part of the descriptive text
+unless they start with one of the following keywords.
+If the first non-blank character of a line is the `at-character' then one of these
+keywords is expected; otherwise a warning is issued.
+These keywords allow you to set some options that are explained in the
+following paragraphs.
+
+This table lists all valid keywords; some of them expect a value that
+is defined after an equal sign (`='). Spaces around the equal sign are
+optional. Some of these keywords are only allowed in description files
+for either files or directories, and some are valid for both types.
+
+    Keyword allowed in ...  files   directories
+
+    @LABEL = <string>         X          X
+    @SHORT = <string>         X          X
+    @POSITION = <integer>     X          X
+    @DEPRECATED               X          X
+    @NAVLABEL = <string>                 X
+    @OVERVIEW                            X
+    @TARGET = <string>                   X
+    @TEXT2HTML                X
+    @VERSION = <string>       X
+
+This table shows which keywords can be used depending on the type of file
+that is described.
+
+If @LABEL is set its value will be used as name for the generated
+link instead of the name of the linked file or directory.
+
+@SHORT allows you to specify a short description that will be used if the
+@OVERVIEW keyword for the containing folder is set (see below).
+The overview table will contain that short description.
+
+The @POSITION keyword can be used to specify the order in which the folder
+contents will be presented. This keyword's value must be a positive number
+or zero.
+The rule is: the smaller the number, the earlier the entry appears on the page.
+Entries that have no defined @POSITION will appear after all other entries
+that have this keyword set to some valid value.
+Entries that are on the same level of positioning, i.e. have the same @POSITION
+value or none at all, will be ordered in the following way:
+directories before files and then ordered lexically.
+
+As a service for your website's visitors you can set the @DEPRECATED keyword for
+entries that you are planning to remove soon.
+
+The @NAVLABEL keyword allows you to specify an alternate label for a directory
+that will be used in the navigation bars.
+For example, if one of your directory labels is `Miscellaneous' it might be
+desirable to create a navigation link labelled `Misc'.
+If this keyword is not set, @LABEL (or the directory name) will be used instead.
+
+If @OVERVIEW is set in a directory description file the generated index page
+will start with an overview table that summarizes the page content (see also:
+@SHORT).
+
+The @TARGET keyword makes it possible to create links that point to
+files located in folders that are not processed by B<treewebber>.  In
+the normal processing of a directory, the link points to the generated
+index file inside that directory.  To change the index file, use the
+B<--index-name> command line argument.  By default, such a link's
+target will be <directory_name>/index.html.  To make the index point
+to some other file, set @TARGET to any filename that exists inside the
+directory.  The result is a link on the parent directory's index page
+along with some descriptive words pointing to the file you chose.
+Note that using the @TARGET keyword implicitly prevents B<treewebber> from
+descending into the directory. In other words, a link to the specified target
+will be created but the contents of the directory will not be processed.
+
+The @TEXT2HTML keyword specifies that the corresponding simple text
+file has preformatted content.  If this keyword is set an HTML page
+will be generated from the original file.  The original file will not
+be modified.  The advantage of the HTML-based page is that it
+integrates well with the website's navigation and style.  The actual
+page content will not be modified but rather included verbatim.
+
+The @VERSION takes an arbitrary string that represents the file's
+version. Examples are 0.21 or 1.5 or 1.0pre5.
+This keyword can indicate the progress of a program or document.
+
+
+=head2 CUSTOMIZATION BY STYLE SHEETS
+
+The appearance of the generated pages can be influenced by using a
+style sheet file (see B<--css> option below), which is highly recommended.
+Besides the usual style settings there are some special classes that are used
+by B<treewebber> and therefore should be defined:
+
+=over 4
+
+=item div.page
+
+All content inside the page body is surrounded by an HTML div element of this
+class.
+
+=item table.overview
+
+All overview tables use this class (see @OVERVIEW keyword).
+
+=item td.overview
+
+All table cells inside overview tables use this class (see @OVERVIEW keyword).
+
+=item td.navigation
+
+The appearance of the navigation can be adjusted by this class of the HTML table
+cells.
+
+=item span.qualifiers
+
+The additional qualifiers following links on index pages are surrounded by an
+HTML span element and can be customized by this class.
+
+=back
+
+
+=head2 INCLUDE CONTENT PAGES
+
+It is easily possible to include pages with arbitrary content into the generated
+web. For example, to include a contact page that is properly linked,
+has a navigation bar and has the same style as all other pages, follow these
+steps:
+
+=over 4
+
+=item Create the include file
+
+Include files are recognized by their filename extension, which must be
+`*.inc.html'. In this example, create a file named `contact.inc.html' that
+contains the content of the page. That is, some well-formed HTML markup that is
+allowed inside the body element of an HTML page. Everything else, especially the
+page header and the enclosing body tags will be generated and must not be part
+of the include file.
+
+=item Create the description file
+
+A description file must be created to indicate that the include file should be
+part of the generated web. In this example it must be named
+`contact.inc.html.desc'.
+
+=item Generate pages
+
+Run B<treewebber>. This will generate and link to `contact.html' from the
+example include file.
+
+=back
+
+
+
+=head1 OPTIONS
+
+This paragraph describes the possible options that can be used to modify this
+program's behaviour.
+If a long option name requires an argument then the short form does so, too.
+Long names can be abbreviated but must stay unique.
+
+=over 4
+
+=item B<-?>, B<-h>, B<--help>
+
+Prints the possible options and exits.
+
+
+=item B<--man>
+
+Prints the whole manual and exits.
+
+
+=item B<-a>, B<--all>
+
+By default, this program skips files and directories that start with a dot (.)
+because by convention these are looked upon as hidden items.
+This switch disables that implicit behaviour.
+
+
+=item B<--css> F<FILE>
+
+Specifies the name of the style sheet file to be used for the generated
+web pages.
+This file must be in the root directory of your web (i.e. in the F<DIRECTORY>
+given as last command line argument).
+
+If this option is omitted, B<treewebber> tests whether one of the following
+files exist. It searches for the files in the order shown, and uses the first file found:
+style.css stylesheet.css style-sheet.css
+
+The generated pages reference the style sheet file by relative paths.
+The pages can thus be correctly displayed on a local webserver as well as on
+some public webserver with an arbitrary domain name.
+
+
+=item B<-f>, B<--force>
+
+Forces the creation of automatically generated files without further checking.
+By default, files are not re-generated (and thus overwritten) if their content
+has not changed.
+
+More specifically, without B<--force> the following optimizations take place:
+(1) Index pages are updated only if their content has changed.
+(2) Files that have the @TEXT2HTML keyword in their description file are
+converted only if the plain text file is newer than the generated HTML.
+(3) Web pages based on HTML include files re-generated only if the
+include file is newer than the generated one.
+
+Cases 2 and 3 depend on the files' modification time, so if your files'
+timestamps were modified by accident (e.g. you B<cp>'ed the files without B<-p>)
+you may need this option.
+
+
+=item B<--index-name> I<STRING>
+
+Sets the filename of the generated index files.
+Defaults to `index.html'.
+Usually there is no need to override this setting.
+
+
+=item B<--sitemap-name> I<STRING>
+
+Sets the filename for the generated site map.
+Defaults to `sitemap.html'.
+Usually there is no need to override this setting.
+The site map is always created within the root directory of your web (i.e. in
+the F<DIRECTORY> given as last command line argument).
+
+The site map is a page that visualizes the tree structure of the website and
+thus helps navigating.
+Each page contains a link to the site map in its navigation bar.
+
+
+=item B<-v>, B<--verbose> I<STRING>
+
+Adjusts the level of output verbosity. There are five categories, ordered by
+severity. This setting means that all messages up to the given severity level
+will be reported; less severe messages will be suppressed.
+
+I<STRING> defaults to C<INFO> which means that all messages from the categories
+C<FATAL>, C<ERROR>, C<WARN> and C<INFO> will be reported.
+Possible values for I<STRING> are:
+
+  FATAL
+  ERROR
+  WARN
+  INFO
+  MORE
+
+
+=item B<-V>, B<--version>
+
+Prints the program version and exits.
+
+
+=back
+
+
+
+=head1 COPYRIGHT AND LICENCE
+
+Copyright (C) 2005   Joachim Jautz   http://www.jay-jay.net/contact.html
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to
+  Free Software Foundation, Inc.
+  51 Franklin Street, Fifth Floor
+  Boston, MA 02110-1301 USA
+
+=cut

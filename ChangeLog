@@ -1,0 +1,73 @@
+2007-04-22 12:52  odin
+
+	* treewebber:
+
+	- documentation improvements by Peter Neilson
+	
+2005-08-26 16:27  odin
+
+	* ChangeLog, README, treewebber-example.tar.gz:
+
+	- adding new files
+	- the example web may be the most important addition for newcomers
+	
+2005-08-26 16:22  odin
+
+	* treewebber:
+
+	- sitemap generation implemented
+	- new option --sitemap-name to override default filename
+	- changed style sheet handling: automatically searching for
+	  typical css file names, option --css overrides this;
+	  restriction: css file must be in web root.
+	- renamed option --indexname to --index-name for consistency
+	- layout of index pages slightly improved
+	- a lot of code refactoring
+	
+2005-08-26 16:11  odin
+
+	* INSTALL:
+
+	- moved parts of this file into README
+	- added info about the dependency from Util::Logger
+	
+2005-08-22 20:49  odin
+
+	* treewebber:
+
+	- Instead of doing everything on the fly, now building tree in
+	  memory that corresponds to the directory structure and holds all
+	  the settings read from the description files. This was a
+	  prerequisite for the following changes and those that are
+	  planned and not yet implemented.
+	- Use @LABEL instead of directory name in navigation bars.
+	- New keyword @NAVLABEL to override @LABEL / directory name in
+	  navigation bars
+	- Adapted manual page
+	
+2005-07-31 12:36  odin
+
+	* treewebber:
+
+	Put script under GNU General Public Licence
+	
+2005-07-29 18:05  odin
+
+	* treewebber:
+
+	- added documentation for the special root description file (root/.desc)
+	- added documentation for .inc.html files
+	- version is now extracted from CVS keywords
+	
+2005-07-27 23:05  odin
+
+	* INSTALL, treewebber:
+
+	Initial revision
+	
+2005-07-27 23:05  odin
+
+	* INSTALL, treewebber:
+
+	Import of treewebber v0.21
+	
