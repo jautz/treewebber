@@ -1,7 +1,7 @@
 #!/usr/bin/perl -w
 #
 # $Id: treewebber,v 1.6 2007-04-22 10:52:08 odin Exp $
-# $Name:  $
+# $Name: rel_0_31 $
 #
 ###############################################################################
 #
@@ -45,7 +45,7 @@ use strict;
 
 use Util::Logger;
 
-my $VERSION = get_version('$Name:  $') || 'unreleased; CVS $Id: treewebber,v 1.6 2007-04-22 10:52:08 odin Exp $';
+my $VERSION = get_version('$Name: rel_0_31 $') || 'unreleased; CVS $Id: treewebber,v 1.6 2007-04-22 10:52:08 odin Exp $';
 
 ##### constants that can be customized #########################################
 
@@ -1037,7 +1037,7 @@ sub parseCommandLineOptions {
 }
 
 ################################################################################
-# get_version('$Name:  $')
+# get_version('$Name: rel_0_31 $')
 #
 # Extracts the release version from the CVS Name Tag that was used to checkout
 # or export the file from the repository.
